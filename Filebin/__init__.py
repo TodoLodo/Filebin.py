@@ -1,7 +1,9 @@
+import asyncio
 import aiohttp
 from PIL import Image
 from io import BytesIO
 import numpy as np
+from Errors import *
 
 
 class API:
@@ -11,30 +13,25 @@ class API:
 
     # Bin
     class _BIN:
-        def __init__(BIN, _re: dict, _get, _put):
-            re_bin = _re.get("bin", {})
-
-            # bin properties
-            BIN.__id = re_bin.get("id", None)
-            BIN.__readonly = re_bin.get("readonly", None)
-            BIN.__bytes = re_bin.get("bytes", None)
-            BIN.__bytes_readable = re_bin.get("bytes_readable", None)
-            BIN.__updated_at = re_bin.get("updated_at", None)
-            BIN.__updated_at_relative = re_bin.get("updated_at_relative", None)
-            BIN.__created_at = re_bin.get("created_at", None)
-            BIN.__created_at_relative = re_bin.get("created_at_relative", None)
-            BIN.__expired_at = re_bin.get("expired_at", None)
-            BIN.__expired_at_relative = re_bin.get("expired_at_relative", None)
-
-            # files
-            BIN.__files = [BIN._FILE(_f) for _f in _re.get("files", [])]
-
+        def __init__(BIN, _r: dict, _get, _post, _put, _delete):
             # fetching functions
             BIN.__get = _get
+            BIN.__post = _post
             BIN.__put = _put
+            BIN.__delete = _delete
+
+            # setting up properties
+            BIN.__set_properties(_r)
 
         class _FILE:
-            def __init__(FILE, _f: dict):
+            def __init__(FILE, _f: dict, _bin_id: str, _get, _delete):
+                # BIN info
+                FILE.__bin_id = _bin_id
+
+                # fetching functions
+                FILE.__get = _get
+                FILE.__delete = _delete
+
                 # file properties
                 FILE.__name = _f.get("filename", None)
                 FILE.__content_type = _f.get("content-type", None)
@@ -88,24 +85,33 @@ class API:
             def created_at_relative(FILE) -> str | None:
                 return FILE.__created_at_relative
 
+            # FILE methods
+            async def download(FILE, _path: str = ".") -> bool:
+                ...
+
+            async def delete(FILE) -> bool:
+                ...
+
         class _QR:
             def __init__(QR, _image_bytes: bytes):
                 QR.__image_bytes = _image_bytes
 
             @property
-            def image_bytes(QR)-> bytes:
+            def image_bytes(QR) -> bytes:
                 return QR.__image_bytes
 
             # methods of QR
             def show(QR) -> None:
                 try:
-                    Image.fromarray((np.array(Image.open(BytesIO(QR.__image_bytes))) * 255).astype('uint8')).show("bin qr")
+                    Image.fromarray((np.array(Image.open(BytesIO(QR.__image_bytes))) * 255).astype('uint8')).show(
+                        "bin qr")
                 except Exception as e:
                     print(f"Error opening image: {e}")
 
             def save(QR, _png_path: str):
                 try:
-                    Image.fromarray((np.array(Image.open(BytesIO(QR.__image_bytes))) * 255).astype('uint8')).save(_png_path)
+                    Image.fromarray((np.array(Image.open(BytesIO(QR.__image_bytes))) * 255).astype('uint8')).save(
+                        _png_path)
                 except Exception as e:
                     print(f"Error opening image: {e}")
 
@@ -114,7 +120,6 @@ class API:
 
                 # Resize the image to fit the console width
                 console_width = 40
-                print(image.height)
                 aspect_ratio = image.width / image.height
                 new_width = int(console_width * 0.8)
                 new_height = int(new_width / aspect_ratio)
@@ -125,13 +130,32 @@ class API:
                 for y in range(resized_image.height):
                     for x in range(resized_image.width):
                         pixel = resized_image.getpixel((x, y))
-                        pixel_color = f"\x1b[48;2;{abs(pixel-1) * 255};{abs(pixel-1)  * 255};{abs(pixel-1)  * 255}m"
+                        pixel_color = f"\x1b[48;2;{abs(pixel - 1) * 255};{abs(pixel - 1) * 255};{abs(pixel - 1) * 255}m"
                         ansi_image += f"{pixel_color} " * 2
                     ansi_image += "\x1b[0m\n"  # Reset color at the end of each line
 
                 return ansi_image
 
-        # properties    
+        # BIN property/attr private setter
+        def __set_properties(BIN, _r: dict) -> None:
+            r_bin = _r.get("bin", {})
+
+            # bin properties
+            BIN.__id = r_bin.get("id", None)
+            BIN.__readonly = r_bin.get("readonly", None)
+            BIN.__bytes = r_bin.get("bytes", None)
+            BIN.__bytes_readable = r_bin.get("bytes_readable", None)
+            BIN.__updated_at = r_bin.get("updated_at", None)
+            BIN.__updated_at_relative = r_bin.get("updated_at_relative", None)
+            BIN.__created_at = r_bin.get("created_at", None)
+            BIN.__created_at_relative = r_bin.get("created_at_relative", None)
+            BIN.__expired_at = r_bin.get("expired_at", None)
+            BIN.__expired_at_relative = r_bin.get("expired_at_relative", None)
+
+            # files
+            BIN.__files = [BIN._FILE(_f) for _f in _files] if (_files := _r.get("files", [])) else []
+
+        # BIN property/attr accessors
         @property
         def id(BIN) -> str | None:
             return BIN.__id
@@ -180,35 +204,56 @@ class API:
         async def qr(BIN):
             return BIN._QR(await BIN.__get(f"qr/{BIN.id}", {"Accept": "image/png"}))
 
-
-        """ def __getattribute__(BIN, _key):
-            print("inside", _key)
-            print("--", getattr(BIN, _key)) """
-
+        # BIN methods
         async def update(BIN) -> object:
             _r = await BIN.__get(BIN.id, {"Accept": "application/json"})
 
-            r_bin = _r.get("bin", {})
-
-            # bin properties
-            BIN.__id = r_bin.get("id", BIN.__id)
-            BIN.__readonly = r_bin.get("readonly", BIN.__readonly)
-            BIN.__bytes = r_bin.get("bytes", BIN.__bytes)
-            BIN.__bytes_readable = r_bin.get("bytes_readable", BIN.__bytes_readable)
-            BIN.__updated_at = r_bin.get("updated_at", BIN.__updated_at)
-            BIN.__updated_at_relative = r_bin.get("updated_at_relative", BIN.__updated_at_relative)
-            BIN.__created_at = r_bin.get("created_at", BIN.__created_at)
-            BIN.__created_at_relative = r_bin.get("created_at_relative", BIN.__created_at_relative)
-            BIN.__expired_at = r_bin.get("expired_at", BIN.__expired_at)
-            BIN.__expired_at_relative = r_bin.get("expired_at_relative", BIN.__expired_at_relative)
-
-            # files
-            BIN.__files = [BIN._FILE(_f) for _f in _r.get("files", [])]
+            BIN.__set_properties(_r)
 
             # returning self
             return BIN
 
-        def __str__(BIN):
+        async def lock(BIN) -> object:
+            await BIN.__put(BIN.id, {"Accept": "application/json"})
+
+            await BIN.update()
+
+            if BIN.readonly:
+                try:
+                    delattr(BIN, "upload")
+                except AttributeError:
+                    print("--x--")
+
+            return BIN  # return self
+
+        async def delete(BIN) -> bool:
+            return await BIN.__delete(BIN.id)
+
+        async def download_archive(BIN, _type: str, _path: str = ".") -> bool:
+            _r = True
+            if _type in ["tar", "zip"]:
+                ...
+            else:
+                raise InvalidArchiveType(_type)
+
+            return _r
+
+        async def get_file(BIN, _file_name: str) -> _FILE:
+            ...
+
+        async def download_file(BIN, _file_name: str, _path: str = ".") -> bool:
+            ...
+
+        async def delete_file(BIN, _file_name: str) -> bool:
+            ...
+
+        async def upload_file(BIN, _file: str | bytes) -> bool:
+            ...
+
+        def __hash__(BIN) -> str:
+            return BIN.id
+
+        def __str__(BIN) -> str:
             return ""
 
             # properties
@@ -241,23 +286,18 @@ class API:
     async def __put(self, _url: str, _headers: dict | None = None):
         async with aiohttp.ClientSession() as session:
             async with session.put(f"{self.__base_endpoint}/{_url}", headers=_headers) as response:
-                _content_type = _headers.get("Accept", None)
+                return True if response.status == 200 else False
 
-                if _content_type == "application/json":
-                    _r = await response.json()
-                elif _content_type == "image/png":
-                    _r = await response.read()
-                else:
-                    _r = response
-
-                return _r
+    async def __delete(self, _url: str, _headers: dict | None = None):
+        async with aiohttp.ClientSession() as session:
+            async with session.delete(f"{self.__base_endpoint}/{_url}", headers=_headers) as response:
+                return True if response.status == 200 else False
 
     """ async def test(self):
         return await self.__get("testbin", {"Accept": "application/json"})
      """
 
-    async def getBin(self, _id: str) -> _BIN:
-        re = await self.__get(_id, {"Accept": "application/json"})
-        _bin = self._BIN(re, self.__get, self.__put)
-        self.__bins[_id] = _bin
-        return _bin
+    async def get_bin(self, _id: str) -> _BIN:
+        self.__bins[_id] = self._BIN(await self.__get(_id, {"Accept": "application/json"}), self.__get, self.__post,
+                                     self.__put, self.__delete)
+        return self.__bins[_id]

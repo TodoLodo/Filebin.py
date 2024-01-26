@@ -1,9 +1,10 @@
 import asyncio
 import aiohttp
+from aiohttp import ClientResponse
 from PIL import Image
 from io import BytesIO
 import numpy as np
-from Errors import *
+from Filebin.Errors import *
 
 
 class API:
@@ -44,7 +45,7 @@ class API:
                 FILE.__created_at = _f.get("created_at", None)
                 FILE.__created_at_relative = _f.get("created_at_relative", None)
 
-            # properties    
+            # properties
             @property
             def name(FILE) -> str | None:
                 return FILE.__name
@@ -87,7 +88,19 @@ class API:
 
             # FILE methods
             async def download(FILE, _path: str = ".") -> bool:
-                ...
+                async def _func(response:ClientResponse):
+                    assert response.status == 200
+                    with open(f"{FILE.name}", "wb") as _f:
+                        # stream download
+                        while True:
+                            _chunk = await response.content.readany()
+                            if not _chunk:
+                                break
+                            _f.write(_chunk)
+
+                _r = await FILE.__get(f"{FILE.__bin_id}/{FILE.name}", _headers={"Accept": "*/*"}, _func=_func)
+
+                return _r
 
             async def delete(FILE) -> bool:
                 ...
@@ -153,7 +166,7 @@ class API:
             BIN.__expired_at_relative = r_bin.get("expired_at_relative", None)
 
             # files
-            BIN.__files = [BIN._FILE(_f) for _f in _files] if (_files := _r.get("files", [])) else []
+            BIN.__files = [BIN._FILE(_f, BIN.id, BIN.__get, BIN.__delete) for _f in _files] if (_files := _r.get("files", [])) else []
 
         # BIN property/attr accessors
         @property
@@ -247,7 +260,7 @@ class API:
         async def delete_file(BIN, _file_name: str) -> bool:
             ...
 
-        async def upload_file(BIN, _file: str | bytes) -> bool:
+        async def upload_file(BIN, _file: str) -> bool:
             ...
 
         def __hash__(BIN) -> str:
@@ -263,7 +276,7 @@ class API:
         return self.__bins
 
     # methods
-    async def __get(self, _url: str, _headers: dict | None = None):
+    async def __get(self, _url: str, _headers: dict = {}, _func=None) -> ClientResponse | bool:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{self.__base_endpoint}/{_url}", headers=_headers) as response:
                 _content_type = _headers.get("Accept", None)
@@ -272,8 +285,18 @@ class API:
                     _r = await response.json()
                 elif _content_type == "image/png":
                     _r = await response.read()
+                elif _content_type == "*/*":
+                    _r = response
                 else:
                     _r = response
+
+                if _func:
+                    try:
+                        await _func(response)
+                        _r = True
+                    except Exception as e:
+                        print(e)
+                        _r = False
 
                 return _r
 
@@ -293,10 +316,7 @@ class API:
             async with session.delete(f"{self.__base_endpoint}/{_url}", headers=_headers) as response:
                 return True if response.status == 200 else False
 
-    """ async def test(self):
-        return await self.__get("testbin", {"Accept": "application/json"})
-     """
-
+    # API public methods
     async def get_bin(self, _id: str) -> _BIN:
         self.__bins[_id] = self._BIN(await self.__get(_id, {"Accept": "application/json"}), self.__get, self.__post,
                                      self.__put, self.__delete)

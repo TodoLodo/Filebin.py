@@ -1,4 +1,8 @@
 import asyncio
+import gzip
+import io
+import json
+from typing import Tuple, Union, Optional, List, Any
 import aiohttp
 from aiohttp import ClientResponse
 from PIL import Image
@@ -22,7 +26,9 @@ class API:
             BIN.__delete = _delete
 
             # setting up properties
-            BIN.__set_properties(_r)
+            BIN.__set_properties(_r=_r)
+
+            BIN.__qr = None
 
         class _FILE:
             def __init__(FILE, _f: dict, _bin_id: str, _get, _delete):
@@ -47,7 +53,7 @@ class API:
 
             # properties
             @property
-            def name(FILE) -> str | None:
+            def name(FILE) -> Optional[str]:
                 return FILE.__name
 
             @property
@@ -88,26 +94,25 @@ class API:
 
             # FILE methods
             async def download(FILE, _path: str = ".") -> bool:
-                async def _func(response:ClientResponse):
-                    assert response.status == 200
-                    with open(f"{FILE.name}", "wb") as _f:
-                        # stream download
-                        while True:
-                            _chunk = await response.content.readany()
-                            if not _chunk:
-                                break
-                            _f.write(_chunk)
+                return_bool = False
+                _r = await FILE.__get(f"{FILE.__bin_id}/{FILE.name}", _headers={"Accept": "*/*"})
 
-                _r = await FILE.__get(f"{FILE.__bin_id}/{FILE.name}", _headers={"Accept": "*/*"}, _func=_func)
+                if _r[0] == 200:
+                    with open(f"{_path}/{FILE.name}", "wb") as _f:
+                        _f.write(_r[1])
+                        return_bool = True
+                elif _r[0] == 404:
+                    raise InvalidFile(FILE.name)
 
-                return _r
+                return return_bool
 
             async def delete(FILE) -> bool:
-                ...
+                return await FILE.__delete(f"{FILE.__bin_id}/{FILE.name}")
 
         class _QR:
-            def __init__(QR, _image_bytes: bytes):
+            def __init__(QR, _image_bytes: bytes, _bin_id: str):
                 QR.__image_bytes = _image_bytes
+                QR.__bin_id = _bin_id
 
             @property
             def image_bytes(QR) -> bytes:
@@ -121,10 +126,10 @@ class API:
                 except Exception as e:
                     print(f"Error opening image: {e}")
 
-            def save(QR, _png_path: str):
+            def save(QR, _path: str = "."):
                 try:
                     Image.fromarray((np.array(Image.open(BytesIO(QR.__image_bytes))) * 255).astype('uint8')).save(
-                        _png_path)
+                        f"{_path}/{QR.__bin_id}.png")
                 except Exception as e:
                     print(f"Error opening image: {e}")
 
@@ -166,60 +171,71 @@ class API:
             BIN.__expired_at_relative = r_bin.get("expired_at_relative", None)
 
             # files
-            BIN.__files = [BIN._FILE(_f, BIN.id, BIN.__get, BIN.__delete) for _f in _files] if (_files := _r.get("files", [])) else []
+            BIN.__files = [BIN._FILE(_f=_f, _bin_id=BIN.id, _get=BIN.__get, _delete=BIN.__delete) for _f in _files] if (
+                _files := _r.get("files", [])) else []
 
         # BIN property/attr accessors
         @property
-        def id(BIN) -> str | None:
+        def id(BIN) -> Optional[str]:
             return BIN.__id
 
         @property
-        def readonly(BIN) -> bool | None:
+        def readonly(BIN) -> Optional[bool]:
             return BIN.__readonly
 
         @property
-        def bytes(BIN) -> int | None:
+        def bytes(BIN) -> Optional[int]:
             return BIN.__bytes
 
         @property
-        def bytes_readable(BIN) -> str | None:
+        def bytes_readable(BIN) -> Optional[str]:
             return BIN.__bytes_readable
 
         @property
-        def files(BIN) -> list[_FILE] | list:
+        def files(BIN) -> List[_FILE]:
             return BIN.__files
 
         @property
-        def updated_at(BIN) -> str | None:
+        def updated_at(BIN) -> Optional[str]:
             return BIN.__updated_at
 
         @property
-        def updated_at_relative(BIN) -> str | None:
+        def updated_at_relative(BIN) -> Optional[str]:
             return BIN.__updated_at_relative
 
         @property
-        def created_at(BIN) -> str | None:
+        def created_at(BIN) -> Optional[str]:
             return BIN.__created_at
 
         @property
-        def created_at_relative(BIN) -> str | None:
+        def created_at_relative(BIN) -> Optional[str]:
             return BIN.__created_at_relative
 
         @property
-        def expired_at(BIN) -> str | None:
+        def expired_at(BIN) -> Optional[str]:
             return BIN.__expired_at
 
         @property
-        def expired_at_relative(BIN) -> str | None:
+        def expired_at_relative(BIN) -> Optional[str]:
             return BIN.__expired_at_relative
 
         @property
-        async def qr(BIN):
-            return BIN._QR(await BIN.__get(f"qr/{BIN.id}", {"Accept": "image/png"}))
+        async def qr(BIN) -> _QR:
+            qr = None
+            if BIN.__qr:
+                qr = BIN.__qr
+            else:
+                _r = await BIN.__get(f"qr/{BIN.id}", {"Accept": "image/png"})
+                if _r[0] == 200:
+                    qr = BIN._QR(_image_bytes=_r[1], _bin_id=BIN.id)
+                elif _r[0] == 404:
+                    raise InvalidBin(BIN.id)
+
+            return qr
 
         # BIN methods
         async def update(BIN) -> object:
-            _r = await BIN.__get(BIN.id, {"Accept": "application/json"})
+            _r = await BIN.__get(_url=BIN.id, _headers={"Accept": "application/json"})
 
             BIN.__set_properties(_r)
 
@@ -233,7 +249,7 @@ class API:
 
             if BIN.readonly:
                 try:
-                    delattr(BIN, "upload")
+                    delattr(BIN, "upload_file")
                 except AttributeError:
                     print("--x--")
 
@@ -251,14 +267,49 @@ class API:
 
             return _r
 
-        async def get_file(BIN, _file_name: str) -> _FILE:
-            ...
+        async def get_file(BIN, _file_name: str, _from_cache: bool = False) -> Optional[_FILE]:
+            return_file = None
+
+            def _rf(_fn: str):
+                for _f in BIN.files:
+                    if _f.name == _file_name:
+                        return _f
+
+            if _from_cache:
+                return_file = _rf(_fn=_file_name)
+            else:
+                await BIN.update()
+                return_file = _rf(_fn=_file_name)
+
+            return return_file
 
         async def download_file(BIN, _file_name: str, _path: str = ".") -> bool:
-            ...
+            return_bool = False
+
+            _r = await BIN.__get(f"{BIN.id}/{_file_name}")
+
+            if _r[0] == 200:
+                with open(f"{_path}/{_file_name}", "wb") as f:
+                    f.write(_r[1])
+                    return_bool = True
+            elif _r[0] == 403:
+                raise DownloadCountReached(_file_name)
+            elif _r[0] == 404:
+                raise InvalidFile(_file_name)
+
+            return return_bool
 
         async def delete_file(BIN, _file_name: str) -> bool:
-            ...
+            return_bool = False
+
+            _r = await BIN.__delete(f"{BIN.id}/{_file_name}", {"Accept": "application/json"})
+
+            if _r[0] == 200:
+                return_bool = True
+            elif _r[0] == 404:
+                raise InvalidBinOrFile(_bin_id=BIN.id, _file_name=_file_name)
+
+            return return_bool
 
         async def upload_file(BIN, _file: str) -> bool:
             ...
@@ -275,49 +326,74 @@ class API:
     def bins(self) -> dict:
         return self.__bins
 
+    async def __response_parser(self, response: ClientResponse) -> Tuple[int, Union[None, dict, str, bytes, ClientResponse, Any, ...]]:
+        _content_type = response.headers.get("Content-Type", None)
+        _content_encoding = response.headers.get("Content-Encoding", None)
+        # print(dict(response.headers))
+        _r = [response.status, None]
+
+        # decompression
+        decompressed_content = None
+        compressed_content = b''
+        if 'gzip' in _content_encoding:
+            # Decompress the response content using gzip
+            # stream download
+            while True:
+                if _chunk := await response.content.readany():
+                    compressed_content += _chunk
+                else:
+                    break
+            try:
+                compressed_file = io.BytesIO(compressed_content)
+                with gzip.GzipFile(fileobj=compressed_file, mode='rb') as f:
+                    decompressed_content = f.read().decode('utf-8')
+            except gzip.BadGzipFile:
+                # Content-Type header indicates gzip, but the content is not valid gzip
+                decompressed_content = compressed_content.decode('utf-8')
+
+        # --
+        if "application/json" in _content_type:
+            _r[1] = json.loads(decompressed_content) if decompressed_content else await response.json()
+        elif "text/plain" in _content_type and _content_encoding:  # errors only
+            _r[1] = decompressed_content if decompressed_content else await response.text()
+        elif any(_e in _content_type for _e in ["image", "application", "text"]):
+            _r[1] = b''
+            while True:
+                _chunk = await response.content.readany()
+                if not _chunk:
+                    break
+                _r[1] += _chunk
+        else:
+            _r[1] = response
+
+        return tuple(_r)
+
     # methods
-    async def __get(self, _url: str, _headers: dict = {}, _func=None) -> ClientResponse | bool:
+    async def __get(self, _url: str, _headers: dict = {"Accept": "*/*"}) -> Tuple[int, Union[None, dict, str, bytes]]:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{self.__base_endpoint}/{_url}", headers=_headers) as response:
-                _content_type = _headers.get("Accept", None)
+                return await self.__response_parser(response=response)
 
-                if _content_type == "application/json":
-                    _r = await response.json()
-                elif _content_type == "image/png":
-                    _r = await response.read()
-                elif _content_type == "*/*":
-                    _r = response
-                else:
-                    _r = response
-
-                if _func:
-                    try:
-                        await _func(response)
-                        _r = True
-                    except Exception as e:
-                        print(e)
-                        _r = False
-
-                return _r
-
-    async def __post(self, _url: str, _headers: dict | None = None):
+    async def __post(self, _url: str, _body, _headers: dict | None = None) -> Tuple[int, Union[None, dict, str, bytes]]:
         async with aiohttp.ClientSession() as session:
             async with session.post(f"{self.__base_endpoint}/{_url}", headers=_headers) as response:
-                _r = await response.json()
-                return _r
+                return await self.__response_parser(response=response)
 
-    async def __put(self, _url: str, _headers: dict | None = None):
+    async def __put(self, _url: str, _headers: dict | None = None) -> Tuple[int, Union[None, dict, str, bytes]]:
         async with aiohttp.ClientSession() as session:
             async with session.put(f"{self.__base_endpoint}/{_url}", headers=_headers) as response:
-                return True if response.status == 200 else False
+                return await self.__response_parser(response=response)
 
-    async def __delete(self, _url: str, _headers: dict | None = None):
+    async def __delete(self, _url: str, _headers: dict | None = None) -> Tuple[int, Union[None, dict, str, bytes]]:
         async with aiohttp.ClientSession() as session:
             async with session.delete(f"{self.__base_endpoint}/{_url}", headers=_headers) as response:
-                return True if response.status == 200 else False
+                return await self.__response_parser(response=response)
 
     # API public methods
     async def get_bin(self, _id: str) -> _BIN:
-        self.__bins[_id] = self._BIN(await self.__get(_id, {"Accept": "application/json"}), self.__get, self.__post,
-                                     self.__put, self.__delete)
+        _r = await self.__get(_id, {"Accept": "application/json"})
+        if _r[0] == 200:
+            self.__bins[_id] = self._BIN(_r[1], self.__get, self.__post, self.__put, self.__delete)
+        elif _r[0] == 404:
+            raise InvalidBin(_id)
         return self.__bins[_id]

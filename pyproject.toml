@@ -1,0 +1,28 @@
+# pyproject.toml
+
+[tool.poetry]
+name = "Filebin.py"
+version = "0.1.0.dev1"
+description = "Your package description"
+authors = [
+    "Todo Lodo <me@todolodo.xyz>",
+]
+repository = "https://github.com/TodoLodo/Filebin.py"
+documentation = "https://github.com/TodoLodo/Filebin.py#README"
+packages = [
+    { include = "Filebin" },
+]
+include = ["pyproject.toml"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+aiohttp = "^3.7.4"
+
+[tool.poetry.scripts]
+filebin = "filebin:main"
+
+[tool.poetry.dev-dependencies]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
